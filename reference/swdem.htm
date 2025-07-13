@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>瑞士高清晰影像下载器 (Swiss Imagery Downloader) - v4.5</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css" />
+
+    <style>
+        body { 
+            padding: 0; 
+            margin: 0; 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; 
+        }
+        html, body, #map { 
+            height: 100%; 
+            width: 100vw; 
+        }
+        
+        .info-box {
+            position: absolute; top: 10px; right: 10px;
+            background: rgba(255, 255, 255, 0.95); padding: 15px;
+            border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+            z-index: 1000; max-width: 350px; border: 1px solid #ddd;
+        }
+        .info-box h4 { margin-top: 0; color: #333; }
+        .info-box p { font-size: 14px; line-height: 1.6; color: #555; margin: 5px 0; }
+        .info-box hr { border: 0; border-top: 1px solid #eee; margin: 15px 0; }
+        .rect-icon {
+             display: inline-block; vertical-align: middle; width: 16px; height: 16px;
+             border: 2px solid #3388ff; background: rgba(51, 136, 255, 0.1);
+        }
+        #area-display { margin-top: 10px; font-weight: bold; }
+        #status-details { 
+            font-size: 13px; color: #333; line-height: 1.5; 
+            background-color: #f7f7f7; border-left: 3px solid #007bff;
+            padding: 8px 12px; margin-top: 10px; border-radius: 4px;
+        }
+        #action-button {
+            display: none; width: 100%; padding: 10px; margin-top: 10px;
+            font-size: 16px; font-weight: bold; color: white;
+            background-color: #28a745; border: none; border-radius: 5px;
+            cursor: pointer; transition: background-color 0.2s;
+        }
+        #action-button:hover { background-color: #218838; }
+        #action-button:disabled { background-color: #6c757d; cursor: not-allowed; }
+        #action-button.cancel { background-color: #ffc107; color: #212529; }
+        #action-button.cancel:hover { background-color: #e0a800; }
+
+        #download-links a {
+            display: block; padding: 10px; margin-top: 8px;
+            background-color: #007bff; color: white;
+            text-align: center; text-decoration: none;
+            border-radius: 5px; font-weight: bold;
+            transition: background-color 0.2s;
+        }
+        #download-links a:hover { background-color: #0056b3; }
+
+        /* Styles for coordinate input section */
+        details > summary {
+            cursor: pointer;
+            font-weight: bold;
+            color: #007bff;
+        }
+        .coord-input-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        .coord-input-grid input {
+            width: 100%;
+            padding: 5px;
+            box-sizing: border-box;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        #update-from-coords-btn {
+            width: 100%;
+            padding: 8px;
+            margin-top: 10px;
+            background-color: #17a2b8;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        #update-from-coords-btn:hover {
+            background-color: #138496;
+        }
+    </style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div class="info-box">
+    <h4>操作指南</h4>
+    <p>1. 使用左侧工具栏的矩形工具 <span class="rect-icon"></span> 在地图上绘制区域。</p>
+    <details open>
+        <summary>或通过坐标输入</summary>
+        <div class="coord-input-grid">
+            <input type="number" id="min-lon" placeholder="最小经度 (Min Lon)" value="7.43695">
+            <input type="number" id="max-lon" placeholder="最大经度 (Max Lon)" value="7.43958">
+            <input type="number" id="min-lat" placeholder="最小纬度 (Min Lat)" value="46.95094">
+            <input type="number" id="max-lat" placeholder="最大纬度 (Max Lat)" value="46.95274">
+        </div>
+        <button id="update-from-coords-btn">从坐标更新</button>
+    </details>
+    <hr>
+    <div>
+        <p id="overall-status">状态：等待绘制区域</p>
+        <div id="status-details" style="display: none;"></div>
+        <p id="area-display">面积：- km²</p>
+    </div>
+    <button id="action-button">提交任务</button>
+    <div id="download-links"></div>
+    <hr>
+    <p style="font-size: smaller; color: #777;">数据来源: <a href="https://www.swisstopo.admin.ch/" target="_blank" rel="noopener noreferrer">© swisstopo</a></p>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+
+<script>
+    // ==========================================================================
+    // 全局配置与变量
+    // ==========================================================================
+    const BACKEND_URL = 'http://127.0.0.1:5000';
+    const MAX_AREA_KM2 = 100;
+    let selectedGeoJson = null;
+    let currentDrawer = null;
+    let pollingInterval = null;
+    let currentButtonAction = 'none';
+    let currentTaskId = null; // [NEW] Store the current task ID
+
+    // ==========================================================================
+    // DOM 元素获取
+    // ==========================================================================
+    const map = L.map('map').setView([46.8, 8.2], 9);
+    const overallStatus = document.getElementById('overall-status');
+    const statusDetails = document.getElementById('status-details');
+    const areaDisplay = document.getElementById('area-display');
+    const actionButton = document.getElementById('action-button');
+    const downloadLinksContainer = document.getElementById('download-links');
+    const minLonInput = document.getElementById('min-lon');
+    const maxLonInput = document.getElementById('max-lon');
+    const minLatInput = document.getElementById('min-lat');
+    const maxLatInput = document.getElementById('max-lat');
+    const updateFromCoordsBtn = document.getElementById('update-from-coords-btn');
+
+
+    // ==========================================================================
+    // 地图和绘制工具初始化
+    // ==========================================================================
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    }).addTo(map);
+    
+    const drawnItems = new L.FeatureGroup();
+    map.addLayer(drawnItems);
+
+    const drawControl = new L.Control.Draw({
+        draw: {
+            polygon: false, rectangle: { shapeOptions: { color: '#007bff' } },
+            polyline: false, circle: false, marker: false, circlemarker: false,
+        },
+        edit: { featureGroup: drawnItems }
+    });
+    map.addControl(drawControl);
+
+    // ==========================================================================
+    // 核心功能函数
+    // ==========================================================================
+
+    function calculateArea(bounds) {
+        const southWest = bounds.getSouthWest();
+        const northEast = bounds.getNorthEast();
+        const avgLatRad = ((southWest.lat + northEast.lat) / 2) * (Math.PI / 180);
+        const latDist = 111.32 * (northEast.lat - southWest.lat);
+        const lonDist = 111.32 * (northEast.lng - southWest.lng) * Math.cos(avgLatRad);
+        return Math.abs(latDist * lonDist);
+    }
+
+    function setButtonAction(action) {
+        currentButtonAction = action;
+        actionButton.disabled = false;
+        actionButton.className = '';
+        actionButton.style.display = 'block';
+
+        switch(action) {
+            case 'submit':
+                actionButton.textContent = '提交任务';
+                actionButton.style.backgroundColor = '#28a745';
+                break;
+            case 'cancel':
+                actionButton.textContent = '取消任务';
+                actionButton.className = 'cancel';
+                break;
+            case 'error':
+                actionButton.textContent = '重新提交';
+                actionButton.style.backgroundColor = '#dc3545';
+                currentButtonAction = 'submit';
+                break;
+            case 'none':
+            default:
+                actionButton.style.display = 'none';
+                break;
+        }
+    }
+
+    function updateUIForArea(area, final = false) {
+        areaDisplay.textContent = `面积：${area.toFixed(2)} km²`;
+        if (area > MAX_AREA_KM2) {
+            areaDisplay.style.color = '#d9534f';
+            if (final) {
+                overallStatus.textContent = '状态：面积过大，无法提交';
+                setButtonAction('none');
+                selectedGeoJson = null;
+            }
+        } else {
+            areaDisplay.style.color = '#5cb85c';
+            if (final) {
+                overallStatus.textContent = '状态：已选择区域，等待提交';
+                setButtonAction('submit');
+            }
+        }
+    }
+    
+    function resetUI() {
+        if (pollingInterval) clearInterval(pollingInterval);
+        pollingInterval = null;
+        currentTaskId = null;
+        
+        overallStatus.textContent = '状态：等待绘制新区域';
+        overallStatus.style.color = '#555';
+        statusDetails.style.display = 'none';
+        downloadLinksContainer.innerHTML = '';
+        areaDisplay.textContent = '面积：- km²';
+        drawnItems.clearLayers();
+        selectedGeoJson = null;
+        setButtonAction('none');
+        // Clear input fields on reset
+        minLonInput.value = '';
+        maxLonInput.value = '';
+        minLatInput.value = '';
+        maxLatInput.value = '';
+    }
+
+    function pollStatus(taskId) {
+        currentTaskId = taskId; // Store the task ID
+        setButtonAction('cancel');
+
+        pollingInterval = setInterval(async () => {
+            try {
+                const response = await fetch(`${BACKEND_URL}/api/task_status/${taskId}`);
+                if (!response.ok) throw new Error('无法获取任务状态');
+                const data = await response.json();
+                
+                // If status is cancelled on the backend, stop polling from frontend too
+                if (data.status === 'cancelled') {
+                    resetUI();
+                    overallStatus.textContent = '状态：任务已取消';
+                    return;
+                }
+
+                overallStatus.textContent = `状态：${data.message || data.status}`;
+                if (data.progress) {
+                    statusDetails.style.display = 'block';
+                    statusDetails.innerHTML = `影像: ${data.progress.image.message}`;
+                }
+
+                if (data.status === 'complete') {
+                    clearInterval(pollingInterval);
+                    overallStatus.textContent = '状态：处理完成！';
+                    setButtonAction('none');
+
+                    downloadLinksContainer.innerHTML = '';
+                    if (data.download_urls.dom) {
+                        const domLink = document.createElement('a');
+                        domLink.href = BACKEND_URL + data.download_urls.dom;
+                        domLink.textContent = '下载影像 (.tif)';
+                        domLink.download = 'dom_clipped.tif';
+                        downloadLinksContainer.appendChild(domLink);
+                    }
+                } else if (data.status === 'error') {
+                    clearInterval(pollingInterval);
+                    overallStatus.textContent = `错误: ${data.message}`;
+                    overallStatus.style.color = '#d9534f';
+                    setButtonAction('error');
+                }
+            } catch (error) {
+                clearInterval(pollingInterval);
+                overallStatus.textContent = '错误：与服务器失去连接';
+                overallStatus.style.color = '#d9534f';
+                actionButton.disabled = false;
+                console.error('Polling failed:', error);
+            }
+        }, 3000);
+    }
+
+    actionButton.addEventListener('click', () => {
+        switch(currentButtonAction) {
+            case 'submit':
+                submitRequest();
+                break;
+            case 'cancel':
+                if (currentTaskId) {
+                    // [NEW] Send cancellation request to the backend
+                    fetch(`${BACKEND_URL}/api/cancel_task/${currentTaskId}`, { method: 'POST' })
+                        .then(response => response.json())
+                        .then(data => console.log('Cancel response:', data))
+                        .catch(err => console.error('Failed to send cancel request:', err));
+                }
+                if (pollingInterval) clearInterval(pollingInterval);
+                resetUI();
+                overallStatus.textContent = '状态：任务已取消';
+                break;
+        }
+    });
+
+    async function submitRequest() {
+        if (!selectedGeoJson) {
+            alert('没有有效的选择区域。');
+            return;
+        }
+        actionButton.disabled = true;
+        overallStatus.textContent = '状态：正在提交任务...';
+        overallStatus.style.color = '#f0ad4e';
+        statusDetails.style.display = 'none';
+        downloadLinksContainer.innerHTML = '';
+
+        try {
+            const response = await fetch(`${BACKEND_URL}/api/process_area`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ geometry: selectedGeoJson.geometry })
+            });
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.error || `服务器错误: ${response.status}`);
+            }
+            const data = await response.json();
+            overallStatus.textContent = `状态：${data.message || '任务已提交'}`;
+            pollStatus(data.task_id);
+        } catch (e) {
+            overallStatus.textContent = `错误: ${e.message}`;
+            overallStatus.style.color = '#d9534f';
+            setButtonAction('error');
+            console.error("Submission failed:", e);
+        }
+    }
+
+    // ==========================================================================
+    // 事件监听
+    // ==========================================================================
+    map.on('draw:drawstart', function(e) {
+        resetUI();
+        overallStatus.textContent = '状态：正在绘制...';
+        currentDrawer = e.layer;
+        map.on('mousemove', onDrawing);
+    });
+
+    function onDrawing(e) {
+        if (currentDrawer && currentDrawer._latlngs) {
+            const bounds = L.latLngBounds(currentDrawer.getLatLngs()[0][0], e.latlng);
+            updateUIForArea(calculateArea(bounds), false);
+        }
+    }
+
+    map.on(L.Draw.Event.CREATED, function (event) {
+        map.off('mousemove', onDrawing);
+        currentDrawer = null;
+        const layer = event.layer;
+        drawnItems.addLayer(layer);
+        
+        const bounds = layer.getBounds();
+        minLonInput.value = bounds.getWest().toFixed(6);
+        maxLonInput.value = bounds.getEast().toFixed(6);
+        minLatInput.value = bounds.getSouth().toFixed(6);
+        maxLatInput.value = bounds.getNorth().toFixed(6);
+
+        const area = calculateArea(bounds);
+        updateUIForArea(area, true);
+        if (area <= MAX_AREA_KM2) {
+            selectedGeoJson = layer.toGeoJSON();
+        }
+    });
+
+    updateFromCoordsBtn.addEventListener('click', () => {
+        drawnItems.clearLayers();
+        if (pollingInterval) clearInterval(pollingInterval);
+        downloadLinksContainer.innerHTML = '';
+
+        const minLon = parseFloat(minLonInput.value);
+        const maxLon = parseFloat(maxLonInput.value);
+        const minLat = parseFloat(minLatInput.value);
+        const maxLat = parseFloat(maxLatInput.value);
+
+        if (isNaN(minLon) || isNaN(maxLon) || isNaN(minLat) || isNaN(maxLat)) {
+            alert('请输入所有有效的坐标值。');
+            resetUI();
+            return;
+        }
+
+        if (minLon >= maxLon || minLat >= maxLat) {
+            alert('最小坐标值必须小于最大坐标值。');
+            resetUI();
+            return;
+        }
+
+        const bounds = L.latLngBounds([
+            [minLat, minLon],
+            [maxLat, maxLon]
+        ]);
+
+        const layer = L.rectangle(bounds, { color: '#007bff' });
+        drawnItems.addLayer(layer);
+        map.fitBounds(bounds, { padding: [50, 50] });
+
+        const area = calculateArea(bounds);
+        updateUIForArea(area, true);
+
+        if (area <= MAX_AREA_KM2) {
+            selectedGeoJson = layer.toGeoJSON();
+        }
+    });
+    
+</script>
+</body>
+</html>

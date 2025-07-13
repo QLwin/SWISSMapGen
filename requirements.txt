@@ -1,0 +1,7 @@
+Flask
+Flask-Cors
+requests
+rasterio
+shapely
+pyproj
+werkzeug
