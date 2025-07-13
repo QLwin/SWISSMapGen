@@ -26,6 +26,18 @@ TASK_QUEUE = deque()
 TASK_STATUS = {}
 QUEUE_LOCK = threading.Lock()
 
+# --- WMTS Configuration ---
+WMTS_BASE_URL = "https://wmts.geo.admin.ch/1.0.0"
+WMTS_LAYER = "ch.swisstopo.swissimage-dop10"
+WMTS_TILE_MATRIX_SET = "2056"
+WMTS_TIME = "current"
+WMTS_ZOOM_LEVEL = "22" # Corresponds to a resolution of ~0.1m/px, which is what we want
+TILE_SIZE_PX = 256
+LV95_ORIGIN = (2420000, 1350000)
+RESOLUTIONS = { # Resolutions in meters per pixel for each zoom level
+    "17": 2.5, "18": 2, "19": 1.5, "20": 1, "21": 0.5, "22": 0.25, "23": 0.1
+}
+
 # --- Helper Functions ---
 def update_subtask_status(task_id, subtask, status_msg):
     """Helper function to update sub-task status safely."""
@@ -33,61 +45,59 @@ def update_subtask_status(task_id, subtask, status_msg):
         if task_id in TASK_STATUS:
             TASK_STATUS[task_id]['progress'][subtask]['message'] = status_msg
 
-def find_valid_tile_url(session, tile_name):
-    """
-    Iterates from the current year down to 2017 to find a valid URL for a single tile.
-    """
-    current_year = datetime.now().year
-    for year in range(current_year, 2016, -1):
-        base_url = f"https://data.geo.admin.ch/ch.swisstopo.swissimage-dop10/swissimage-dop10_{year}"
-        url = f"{base_url}_{tile_name}/swissimage-dop10_{year}_{tile_name}_0.1_2056.tif"
-        try:
-            response = session.head(url, timeout=10)
-            if response.status_code == 200:
-                return url
-        except requests.exceptions.RequestException:
-            continue
-    return None
+def lv95_to_tile_coords(x, y, zoom):
+    """Converts LV95 coordinates to WMTS tile column and row."""
+    resolution = RESOLUTIONS[zoom]
+    col = math.floor((x - LV95_ORIGIN[0]) / (TILE_SIZE_PX * resolution))
+    row = math.floor((LV95_ORIGIN[1] - y) / (TILE_SIZE_PX * resolution))
+    return col, row
 
-def get_cog_urls_by_iteration(geom_lv95_shape, task_id, data_type, subtask_key):
+def get_wmts_urls(geom_lv95_shape, task_id, subtask_key):
     """
-    Calculates required tiles and finds their valid URLs by iterating through years.
+    Calculates the required WMTS tile URLs for the given geometry.
     """
-    update_subtask_status(task_id, subtask_key, f"Calculating required {data_type} tiles...")
+    update_subtask_status(task_id, subtask_key, "Calculating required imagery tiles...")
     minx, miny, maxx, maxy = geom_lv95_shape.bounds
-    grid_size = 1000
 
-    min_x_idx = math.floor(minx / grid_size)
-    max_x_idx = math.floor(maxx / grid_size)
-    min_y_idx = math.floor(miny / grid_size)
-    max_y_idx = math.floor(maxy / grid_size)
+    min_col, max_row = lv95_to_tile_coords(minx, miny, WMTS_ZOOM_LEVEL)
+    max_col, min_row = lv95_to_tile_coords(maxx, maxy, WMTS_ZOOM_LEVEL)
 
-    tile_names_to_check = []
-    for x_idx in range(min_x_idx, max_x_idx + 1):
-        for y_idx in range(min_y_idx, max_y_idx + 1):
-            tile_names_to_check.append(f"{x_idx}-{y_idx}")
+    urls = []
+    for r in range(min_row, max_row + 1):
+        for c in range(min_col, max_col + 1):
+            url = (
+                f"{WMTS_BASE_URL}/{WMTS_LAYER}/default/{WMTS_TIME}/"
+                f"{WMTS_TILE_MATRIX_SET}/{WMTS_ZOOM_LEVEL}/{r}/{c}.tif"
+            )
+            urls.append(url)
     
+    update_subtask_status(task_id, subtask_key, f"Found {len(urls)} potential tiles. Validating...")
+
+    # --- Validate URLs ---
     valid_urls = []
     with requests.Session() as session:
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_DOWNLOAD_WORKERS) as executor:
-            future_to_tile = {executor.submit(find_valid_tile_url, session, name): name for name in tile_names_to_check}
-            for i, future in enumerate(concurrent.futures.as_completed(future_to_tile)):
+            future_to_url = {executor.submit(session.head, url, timeout=10): url for url in urls}
+            for i, future in enumerate(concurrent.futures.as_completed(future_to_url)):
                 with QUEUE_LOCK:
                     if TASK_STATUS.get(task_id, {}).get('status') == 'cancelled':
-                        return None 
-                update_subtask_status(task_id, subtask_key, f"Validating tile URLs ({i + 1}/{len(tile_names_to_check)})...")
-                url = future.result()
-                if url:
-                    valid_urls.append(url)
+                        return None
+                update_subtask_status(task_id, subtask_key, f"Validating tile URLs ({i + 1}/{len(urls)})...")
+                try:
+                    response = future.result()
+                    if response.status_code == 200:
+                        valid_urls.append(response.url)
+                except requests.exceptions.RequestException:
+                    continue # Ignore tiles that fail to resolve
     
     return valid_urls
 
+
 def process_dataset_remotely(geom_lv95_shape, task_id, data_type, subtask_key):
     """
-    High-performance processing function that clips data directly from remote COG URLs
-    at their native, full resolution.
+    High-performance processing function that clips data directly from remote WMTS tile URLs.
     """
-    urls = get_cog_urls_by_iteration(geom_lv95_shape, task_id, data_type, subtask_key)
+    urls = get_wmts_urls(geom_lv95_shape, task_id, subtask_key)
     
     with QUEUE_LOCK:
         if TASK_STATUS.get(task_id, {}).get('status') == 'cancelled' or urls is None:
@@ -95,9 +105,11 @@ def process_dataset_remotely(geom_lv95_shape, task_id, data_type, subtask_key):
 
     if not urls:
         update_subtask_status(task_id, subtask_key, 'No valid tiles found.')
+        print(f"Task {task_id}: No valid tile URLs found for the given geometry.")
         return None
 
-    target_resolution = COLLECTION_RESOLUTIONS.get('ch.swisstopo.swissimage-dop10')
+    print(f"Task {task_id}: Found {len(urls)} valid tile URLs. Starting processing.")
+    target_resolution = RESOLUTIONS[WMTS_ZOOM_LEVEL]
     resampling_method = Resampling.cubic
     
     sources_for_merging = []
@@ -106,58 +118,56 @@ def process_dataset_remotely(geom_lv95_shape, task_id, data_type, subtask_key):
         update_subtask_status(task_id, subtask_key, f"Reading {data_type} from cloud ({i + 1}/{len(urls)})...")
         try:
             with rasterio.open(url) as src:
-                vrt_options = {
-                    'resampling': resampling_method, 'crs': src.crs,
-                    'width': src.width, 'height': src.height,
-                    'transform': src.transform
-                }
-                with WarpedVRT(src, **vrt_options) as vrt:
-                    out_image, out_transform = mask(vrt, [geom_lv95_shape], crop=True)
-                    
-                    if out_image.any():
-                        out_meta = src.meta.copy()
-                        out_meta.update({
-                            "driver": "GTiff", "height": out_image.shape[1],
-                            "width": out_image.shape[2], "transform": out_transform
-                        })
-                        
-                        memfile = io.BytesIO()
-                        with rasterio.open(memfile, 'w', **out_meta) as dst:
-                            dst.write(out_image)
-                        memfile.seek(0)
-                        sources_for_merging.append(rasterio.open(memfile))
-
+                # Since we are getting tiles, we merge first, then mask.
+                sources_for_merging.append(rasterio.open(url))
         except Exception as e:
-            print(f"Failed to process from URL: {url}, Error: {e}")
+            print(f"Task {task_id}: Failed to open URL: {url}, Error: {e}")
             continue
 
     if not sources_for_merging:
-        update_subtask_status(task_id, subtask_key, 'Could not clip data from any valid source.')
+        update_subtask_status(task_id, subtask_key, 'Could not open any valid source for merging.')
+        print(f"Task {task_id}: Could not create any data fragments from the sources.")
         return None
 
-    update_subtask_status(task_id, subtask_key, f"Merging clipped {data_type} fragments...")
+    update_subtask_status(task_id, subtask_key, f"Merging {len(sources_for_merging)} {data_type} fragments...")
     
-    minx, miny, maxx, maxy = geom_lv95_shape.bounds
-    out_width_px = (maxx - minx) / target_resolution[0]
-    out_height_px = (maxy - miny) / target_resolution[1]
+    try:
+        mosaic, out_trans = merge(sources_for_merging)
+    finally:
+        for src in sources_for_merging:
+            src.close() # Ensure all source files are closed
 
-    effective_resolution = target_resolution
-    if max(out_width_px, out_height_px) > MAX_PIXELS:
-        scale_factor = max(out_width_px, out_height_px) / MAX_PIXELS
-        effective_resolution = (target_resolution[0] * scale_factor, target_resolution[1] * scale_factor)
-        update_subtask_status(task_id, subtask_key, f"Area too large, downsampling...")
+    # Create an in-memory dataset from the merged mosaic
+    out_meta = sources_for_merging[0].meta.copy()
+    out_meta.update({
+        "driver": "GTiff",
+        "height": mosaic.shape[1],
+        "width": mosaic.shape[2],
+        "transform": out_trans,
+    })
 
-    mosaic, out_trans = merge(sources_for_merging, res=effective_resolution, resampling=resampling_method)
-    
-    final_meta = sources_for_merging[0].meta.copy()
-    final_meta.update({"driver": "GTiff", "height": mosaic.shape[1], "width": mosaic.shape[2], "transform": out_trans})
+    with rasterio.io.MemoryFile() as memfile:
+        with memfile.open(**out_meta) as dataset:
+            dataset.write(mosaic)
+            
+            # Now, mask the merged dataset
+            update_subtask_status(task_id, subtask_key, "Clipping merged data to selection...")
+            clipped_image, clipped_transform = mask(dataset, [geom_lv95_shape], crop=True)
 
-    for src in sources_for_merging:
-        src.close()
+    if not clipped_image.any():
+        update_subtask_status(task_id, subtask_key, 'Clipping resulted in an empty image.')
+        return None
+
+    final_meta = out_meta.copy()
+    final_meta.update({
+        "height": clipped_image.shape[1],
+        "width": clipped_image.shape[2],
+        "transform": clipped_transform,
+    })
 
     final_mem_file = io.BytesIO()
     with rasterio.open(final_mem_file, 'w', **final_meta) as dst:
-        dst.write(mosaic)
+        dst.write(clipped_image)
     final_mem_file.seek(0)
 
     update_subtask_status(task_id, subtask_key, 'Processing complete')
@@ -202,11 +212,23 @@ def worker():
                 with QUEUE_LOCK:
                     TASK_STATUS[task_id]['message'] = 'Saving result file...'
                 
+                print(f"Attempting to save file for task {task_id}")
                 task_results_dir = os.path.join(os.getcwd(), 'results', task_id)
+                print(f"Task results directory: {task_results_dir}")
                 os.makedirs(task_results_dir, exist_ok=True)
+                print(f"Task results directory created/exists: {os.path.exists(task_results_dir)}")
                 
                 dom_path = os.path.join(task_results_dir, 'dom_clipped.tif')
-                with open(dom_path, 'wb') as f: f.write(img_file.getbuffer())
+                print(f"Output TIFF path: {dom_path}")
+                
+                try:
+                    img_buffer = img_file.getbuffer()
+                    print(f"Image buffer size: {len(img_buffer)} bytes")
+                    with open(dom_path, 'wb') as f:
+                        f.write(img_buffer)
+                    print(f"File successfully written to {dom_path}")
+                except Exception as write_e:
+                    print(f"Error writing file {dom_path}: {write_e}")
                 download_urls = {'dom': f'/api/download/{task_id}/dom_clipped.tif'}
 
                 with QUEUE_LOCK:

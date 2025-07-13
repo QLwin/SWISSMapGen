@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request, send_from_directory, abort
+from flask import Flask, jsonify, request, send_from_directory, abort, send_file
 from flask_cors import CORS
 import os
 import uuid
@@ -7,6 +7,10 @@ from tasks import worker, TASK_QUEUE, TASK_STATUS, QUEUE_LOCK
 
 app = Flask(__name__)
 CORS(app)
+
+# Ensure the results directory exists
+if not os.path.exists('results'):
+    os.makedirs('results')
 
 # Serve the frontend
 @app.route('/')
@@ -75,8 +79,21 @@ def download_file(task_id, filename):
     if not os.path.exists(filepath): abort(404, "File not found.")
     return send_file(filepath, mimetype='image/tiff', as_attachment=True)
 
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    """Simple health check endpoint."""
+    return jsonify({"status": "ok"}), 200
+
+
+from cheroot.wsgi import Server as CherryPyWSGIServer
 
 if __name__ == '__main__':
     worker_thread = threading.Thread(target=worker, daemon=True)
     worker_thread.start()
-    app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)
+    print("Starting CherryPy server...")
+    server = CherryPyWSGIServer(('0.0.0.0', 8080), app)
+    try:
+        server.start()
+    except KeyboardInterrupt:
+        server.stop()
+    print("CherryPy server stopped.")

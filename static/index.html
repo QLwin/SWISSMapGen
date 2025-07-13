@@ -90,6 +90,16 @@
         #update-from-coords-btn:hover {
             background-color: #138496;
         }
+        #status-light {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-left: 8px;
+            vertical-align: middle;
+        }
+        .status-ok { background-color: #28a745; box-shadow: 0 0 8px #28a745; }
+        .status-error { background-color: #dc3545; box-shadow: 0 0 8px #dc3545; }
     </style>
 </head>
 <body>
@@ -97,7 +107,7 @@
 <div id="map"></div>
 
 <div class="info-box">
-    <h4>操作指南</h4>
+    <h4>操作指南<span id="status-light"></span></h4>
     <p>1. 使用左侧工具栏的矩形工具 <span class="rect-icon"></span> 在地图上绘制区域。</p>
     <details open>
         <summary>或通过坐标输入</summary>
@@ -150,6 +160,7 @@
     const minLatInput = document.getElementById('min-lat');
     const maxLatInput = document.getElementById('max-lat');
     const updateFromCoordsBtn = document.getElementById('update-from-coords-btn');
+    const statusLight = document.getElementById('status-light');
 
 
     // ==========================================================================
@@ -174,6 +185,37 @@
     // ==========================================================================
     // 核心功能函数
     // ==========================================================================
+
+    function setControlsDisabled(disabled) {
+        actionButton.disabled = disabled;
+        updateFromCoordsBtn.disabled = disabled;
+        
+        // Disable draw controls
+        if (disabled) {
+            document.querySelector('.leaflet-draw-toolbar').style.pointerEvents = 'none';
+            document.querySelector('.leaflet-draw-toolbar').style.opacity = '0.5';
+        } else {
+            document.querySelector('.leaflet-draw-toolbar').style.pointerEvents = 'auto';
+            document.querySelector('.leaflet-draw-toolbar').style.opacity = '1';
+        }
+    }
+
+    async function checkBackendStatus() {
+        try {
+            const response = await fetch(`${BACKEND_URL}/api/health`);
+            if (response.ok) {
+                statusLight.className = 'status-ok';
+                setControlsDisabled(false);
+            } else {
+                throw new Error('Backend not responding');
+            }
+        } catch (error) {
+            statusLight.className = 'status-error';
+            setControlsDisabled(true);
+            overallStatus.textContent = '错误：后端服务无响应';
+            overallStatus.style.color = '#d9534f';
+        }
+    }
 
     function calculateArea(bounds) {
         const southWest = bounds.getSouthWest();
@@ -297,6 +339,7 @@
                 overallStatus.style.color = '#d9534f';
                 actionButton.disabled = false;
                 console.error('Polling failed:', error);
+                checkBackendStatus(); // Check status on polling failure
             }
         }, 3000);
     }
@@ -427,6 +470,10 @@
             selectedGeoJson = layer.toGeoJSON();
         }
     });
+
+    // Initial and periodic health check
+    checkBackendStatus();
+    setInterval(checkBackendStatus, 5000);
     
 </script>
 </body>
