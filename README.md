@@ -16,6 +16,45 @@ This project features a decoupled architecture with a frontend interface and a b
 - **Backend**: Python, Flask, Rasterio, Shapely
 - **Frontend**: (To be determined) - Likely HTML/CSS/JavaScript with a mapping library like Leaflet.js.
 
+## How to Use
+
+### Backend
+
+1.  **Clone the repository:**
+    ```bash
+    git clone https://github.com/QLwin/SWISSMapGen.git
+    cd SWISSMapGen
+    ```
+
+2.  **Create a virtual environment and activate it:**
+    ```bash
+    python -m venv venv
+    # On Windows
+    venv\Scripts\activate
+    # On macOS/Linux
+    source venv/bin/activate
+    ```
+
+3.  **Install the required dependencies:**
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+4.  **Run the backend server:**
+    ```bash
+    python app.py
+    ```
+    The server will start on `http://0.0.0.0:8080`.
+
+### Frontend
+
+1.  **Start the backend server** as described in the steps above.
+2.  **Open your web browser** and navigate to:
+    ```
+    http://127.0.0.1:8080
+    ```
+    The web interface will be loaded, and you can start using the application.
+
 ---
 
 # SWISSMapGen
@@ -35,3 +74,42 @@ SWISSMapGen 是一个简易的网络服务，旨在提供高分辨率的瑞士�
 
 - **后端**: Python, Flask, Rasterio, Shapely
 - **前端**: (待定) - 计划使用 HTML/CSS/JavaScript 及 Leaflet.js 等地图库。
+
+## 如何使用
+
+### 后端
+
+1.  **克隆仓库:**
+    ```bash
+    git clone https://github.com/QLwin/SWISSMapGen.git
+    cd SWISSMapGen
+    ```
+
+2.  **创建并激活虚拟环境:**
+    ```bash
+    python -m venv venv
+    # Windows 系统
+    venv\Scripts\activate
+    # macOS/Linux 系统
+    source venv/bin/activate
+    ```
+
+3.  **安装所需依赖:**
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+4.  **运行后端服务:**
+    ```bash
+    python app.py
+    ```
+    服务将启动在 `http://0.0.0.0:8080`。
+
+### 前端
+
+1.  **启动后端服务** (如上述步骤所示)。
+2.  **打开您的网络浏览器** 并访问:
+    ```
+    http://127.0.0.1:8080
+    ```
+    网页界面将会加载，您可以开始使用该应用。
